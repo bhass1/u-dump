@@ -54,12 +54,50 @@ def write(serial, opts, data):
     serial.write(data)
 
 
-def dump(serial, opts):
+def dump(serial, opts, log):
     data = bytes()
     finish = False
-    lastaddr = 0
-    # Send the initial command
-    write(serial, opts, "md %s %s\n" % (hex(opts.start), hex(opts.step * 4)))
+    start_addr = opts.start
+    last_addr = start_addr - 0x10
+
+    # Restore the previous dump
+    if opts.previous:
+        loaded = False
+        with open(opts.previous, 'r') as previous:
+            for line in previous:
+                addr, line_data, text = parse_line(line, opts.size)
+
+                #Check if we skipped some line
+                if last_addr != addr - 0x10:
+                    raise Exception("Possible skip, last address 0x%x doesn't match with previous address 0x%x" % (last_addr, addr - 0x10))
+                last_addr = addr
+
+                #Discard if not start
+                if addr < opts.start:
+                    print("Warning: address of this line is lower than start address! discarding")
+                    continue
+
+                #Store line data
+                data += bytes(line_data)
+
+                #Check if we reach end
+                if addr >= opts.end:
+                    print("Info: Reached specified end address")
+                    finish = True
+                    break
+
+            #If we reach here everything went fine
+            loaded = True
+
+        if not loaded:
+            raise Exception("Dump was not restored completely, something went wrong")
+
+        start_addr = last_addr
+        last_addr = start_addr - 0x10
+
+    if not finish:
+        # Send the initial command
+        write(serial, opts, "md %s %s\n" % (hex(start_addr), hex(opts.step * 4)))
 
     while not finish:
         #Read response
@@ -101,17 +139,19 @@ def dump(serial, opts):
             print("0x%s %s |%s|" % (hex_addr, hex_data, text))
 
             #Check if we skipped some line
-            if lastaddr != 0 and lastaddr != addr - 0x10:
-                raise Exception("Posible skip, last address 0x%x doesn't match with previous address 0x%x" % (lastaddr, addr - 0x10))
-            lastaddr = addr
+            if last_addr != addr - 0x10:
+                raise Exception("Possible skip, last address 0x%x doesn't match with previous address 0x%x" % (last_addr, addr - 0x10))
+            last_addr = addr
 
             #Discard if not start
             if addr < opts.start:
                 print("Warning: address of this line is lower than start address! discarding")
                 continue
 
-            #Store line data
+            #Store line data and log
             data += bytes(line_data)
+            log.write(line)
+            log.flush()
 
             #Check if we reach end
             if addr >= opts.end:
@@ -132,6 +172,7 @@ def main():
     parser.add_argument("--step", type=int, default=64, help="Number of lines per dump chunk")
     parser.add_argument("--size", type=int, default=67, help="Total size of each line including spaces and newlines")
     parser.add_argument("--timeout", type=float, default=0.1, help="Timeout in secs for serial")
+    parser.add_argument("--previous", help="Previous log to continue from")
     parser.add_argument('--debug', action='store_true', help='Enables debug mode')
     opts = parser.parse_args()
 
@@ -162,20 +203,21 @@ def main():
         raise Exception("timeout argument is too low")
     if opts.debug:
         print("Debug mode enabled")
+    name = datetime.fromtimestamp(time()).strftime("%Y-%m-%dT%H:%M:%S") + " " + hex(opts.start) + " " + hex(opts.end)
 
     #Prepare to dump
     serial = Serial(port=opts.port, baudrate=opts.baud, timeout=opts.timeout)
+    log = open(name + ".log", "w")
     try:
-        data = dump(serial, opts)
+        data = dump(serial, opts, log)
     except Exception as e:
         raise e
     finally:
         serial.close()
+        log.close()
 
     #Write to file
-    name = datetime.fromtimestamp(time()).strftime("%Y-%m-%dT%H:%M:%S") + " " + hex(opts.start) + " " + hex(
-        opts.end) + ".img"
-    file = open(name, "wb")
+    file = open(name + ".img", "wb")
     try:
         file.write(data)
     except Exception as e:
