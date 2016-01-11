@@ -5,10 +5,15 @@ from datetime import datetime
 from time import time
 from serial import Serial
 
+def visible(text):
+    text.replace("\n", "\\n")
+    text.replace("\r", "\\r")
+    return text
+
 def parse_line(line, size):
     # Break down each part
     if len(line) != size:
-        raise Exception("Line size %s doesn't match %s" % (len(line), size))
+        raise Exception("Line size %s doesn't match %s: %s" % (len(line), size, visible(line)))
     i = 0
     addr = line[i:i + 8]
     i += 8
@@ -50,23 +55,28 @@ def parse_line(line, size):
 
 def write(serial, opts, data):
     if opts.debug:
-        print("Debug write: " + data.replace("\n", "\\n"))
+        print("Debug write: " + visible(data))
     data = bytes(data, "ascii")
     serial.write(data)
 
 
 def dump(serial, opts, log):
-    data = bytes()
+    data = []
     finish = False
     start_addr = opts.start
     last_addr = start_addr - 0x10
+    do_reset = False
 
     # Restore the previous dump
     if opts.previous:
         loaded = False
+        last_percentage = 0
         print("Info: loading from " + opts.previous)
         with open(opts.previous, 'r') as previous:
-            for line in previous:
+            lines = previous.readlines()
+            count = len(lines)
+            i = 0
+            for line in lines:
                 #Fix lines with only \n
                 if line[-2:] != "\r\n":
                     line = line[:-1] + "\r\n"
@@ -90,10 +100,17 @@ def dump(serial, opts, log):
                     continue
 
                 #Store line data and log
-                data += bytes(line_data)
+                data.append(bytes(line_data))
                 if not opts.ignore_log:
                     log.write(line)
                     log.flush()
+
+                #Print percentage
+                i += 1
+                percentage = int(round(i / count * 100))
+                if last_percentage != percentage:
+                    print("Info: (%i%%) %i/%i " % (percentage, count, i))
+                last_percentage = percentage
 
             #If we reach here everything went fine
             loaded = True
@@ -108,6 +125,7 @@ def dump(serial, opts, log):
     if not finish:
         # Send the initial command
         write(serial, opts, "md %s %s\n" % (hex(start_addr), hex(opts.step * 4)))
+        do_reset = opts.reset
 
     while not finish:
         #Read response
@@ -165,9 +183,13 @@ def dump(serial, opts, log):
             print("0x%s %s |%s|" % (hex_addr, hex_data, text))
 
             #Store line data and log
-            data += bytes(line_data)
+            data.append(bytes(line_data))
             log.write(line)
             log.flush()
+
+        if do_reset:
+            print("Info: sending reset as requested")
+            write(serial, opts, "reset\n")
 
     return data
 
@@ -179,7 +201,7 @@ def main():
     parser.add_argument("baud", type=int, help="Serial baud rate")
     parser.add_argument("start",  help="Start address in dec or hex (with 0x), must be multiple of 16")
     parser.add_argument("end", help="End address in dec or hex (with 0x), must be multiple of 16")
-    parser.add_argument("--step", type=int, default=64, help="Number of lines per dump chunk")
+    parser.add_argument("--step", type=int, default=256, help="Number of lines per dump chunk")
     parser.add_argument("--size", type=int, default=67, help="Total size of each line including spaces and newlines")
     parser.add_argument("--timeout", type=float, default=0.1, help="Timeout in secs for serial")
     parser.add_argument("--previous", help="Previous log to continue from")
@@ -222,9 +244,6 @@ def main():
     log = open(name + ".log", "w")
     try:
         data = dump(serial, opts, log)
-        if opts.reset:
-            print("Info: sending reset as requested")
-            write(serial, opts, "reset")
     except Exception as e:
         raise e
     finally:
@@ -234,7 +253,8 @@ def main():
     #Write to file
     file = open(name + ".img", "wb")
     try:
-        file.write(data)
+        for line in data:
+            file.write(line)
     except Exception as e:
         raise e
     finally:
